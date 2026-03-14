@@ -440,10 +440,10 @@ def load_and_prepare(ticker, period, window):
 #  MODEL BUILDER
 # ─────────────────────────────────────────────
 def build_lstm(window, n_feat, lr):
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
-    from tensorflow.keras.optimizers import Adam
+    
+    from keras.models import Sequential
+    from keras.layers import LSTM, Dense, Dropout, BatchNormalization
+    from keras.optimizers import Adam
     m = Sequential([
         LSTM(128, return_sequences=True, input_shape=(window, n_feat)),
         Dropout(0.2), BatchNormalization(),
@@ -459,10 +459,10 @@ def build_lstm(window, n_feat, lr):
     return m
 
 def build_gru(window, n_feat, lr):
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import GRU, Dense, Dropout, BatchNormalization
-    from tensorflow.keras.optimizers import Adam
+    
+    from keras.models import Sequential
+    from keras.layers import GRU, Dense, Dropout, BatchNormalization
+    from keras.optimizers import Adam
     m = Sequential([
         GRU(128, return_sequences=True, input_shape=(window, n_feat)),
         Dropout(0.2), BatchNormalization(),
@@ -478,11 +478,11 @@ def build_gru(window, n_feat, lr):
     return m
 
 def build_cnn_lstm(window, n_feat, lr):
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import (Conv1D, MaxPooling1D, LSTM,
+    
+    from keras.models import Sequential
+    from keras.layers import (Conv1D, MaxPooling1D, LSTM,
                                           Dense, Dropout, BatchNormalization)
-    from tensorflow.keras.optimizers import Adam
+    from keras.optimizers import Adam
     m = Sequential([
         Conv1D(64, 3, activation="relu", input_shape=(window, n_feat)),
         BatchNormalization(),
@@ -505,10 +505,11 @@ def build_cnn_lstm(window, n_feat, lr):
 #  TRAINING FUNCTION
 # ─────────────────────────────────────────────
 def train_models(X, y, cfg, which_models, progress_bar, status_text):
-    import tensorflow as tf
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+    
+    from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-    tf.random.set_seed(cfg["seed"])
+    import keras
+    keras.utils.set_random_seed(cfg["seed"])
     np.random.seed(cfg["seed"])
 
     window   = cfg["window"]
