@@ -696,7 +696,130 @@ if st.session_state["run_training"] and st.session_state["results"] is None:
             df, X, y, close_sc, feat_sc, feat_scaled, FCOLS, close_idx = out
 
         if df is None:
-            st.error("Could not load data. Check ticker or try a longer period.")
+            ticker_tried = cfg["ticker"]
+            period_tried = cfg["period"]
+
+            # Diagnose why it failed
+            try:
+                test_raw = yf.download(ticker_tried, period="1mo",
+                                       progress=False, auto_adjust=True)
+                if isinstance(test_raw.columns, pd.MultiIndex):
+                    test_raw.columns = [c[0] for c in test_raw.columns]
+                rows_1mo = len(test_raw.dropna(subset=["Close"])) if not test_raw.empty else 0
+            except Exception:
+                rows_1mo = 0
+
+            try:
+                info = yf.Ticker(ticker_tried).info
+                long_name    = info.get("longName", "")
+                exchange     = info.get("exchange", "")
+                quote_type   = info.get("quoteType", "")
+                first_trade  = info.get("firstTradeDateEpochUtc", None)
+                import datetime as _dt
+                listed_since = (
+                    str(_dt.datetime.fromtimestamp(first_trade).date())
+                    if first_trade else "unknown"
+                )
+            except Exception:
+                long_name   = ""
+                exchange    = ""
+                quote_type  = ""
+                listed_since = "unknown"
+
+            # Determine specific reason
+            window_need = cfg["window"] * 3
+            if rows_1mo == 0 and not long_name:
+                reason = (f"**Ticker `{ticker_tried}` not found** on Yahoo Finance. "
+                          f"It may not exist, be delisted, or use a different symbol.")
+                suggestion = "wrong_ticker"
+            elif rows_1mo > 0 and rows_1mo < window_need:
+                reason = (f"**`{ticker_tried}` exists but has only ~{rows_1mo} trading days** "
+                          f"of data on Yahoo Finance. "
+                          f"The model needs at least **{window_need} rows** to train.")
+                suggestion = "new_listing"
+            elif rows_1mo == 0 and long_name:
+                reason = (f"**`{ticker_tried}` ({long_name})** is recognised but returned "
+                          f"no price data for the selected period `{period_tried}`.")
+                suggestion = "period_too_long"
+            else:
+                reason = (f"**Not enough data** for `{ticker_tried}` with period "
+                          f"`{period_tried}`. Need {window_need}+ rows, got {rows_1mo}.")
+                suggestion = "short_period"
+
+            st.error(f"❌ Could not load data for **{ticker_tried}**")
+            st.markdown(
+                f"<div style='background:rgba(255,51,102,0.07);"
+                f"border:1px solid rgba(255,51,102,0.3);border-radius:8px;"
+                f"padding:14px 18px;margin:8px 0;'>"
+                f"<div style='font-family:\"Share Tech Mono\",monospace;"
+                f"font-size:0.78rem;color:#ff6688;margin-bottom:10px;'>"
+                f"🔍 Diagnosis</div>"
+                f"<div style='font-family:Rajdhani,sans-serif;font-size:0.92rem;"
+                f"color:#e8f4f8;line-height:1.8;'>{reason}"
+                + (f"<br><span style='color:#8baabb;'>Listed since: {listed_since}</span>" if listed_since != "unknown" else "")
+                + (f"<br><span style='color:#8baabb;'>Exchange: {exchange} · Type: {quote_type}</span>" if exchange else "")
+                + f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+            # Show fix suggestion
+            fixes = {
+                "wrong_ticker": {
+                    "title": "Try these alternatives",
+                    "items": [
+                        ("MobiKwik correct ticker", "MBL.NS"),
+                        ("Search Yahoo Finance",    "https://finance.yahoo.com/lookup"),
+                        ("NSE stocks always end in", ".NS  e.g. RELIANCE.NS"),
+                        ("BSE stocks always end in", ".BO  e.g. RELIANCE.BO"),
+                        ("US stocks — no suffix",   "AAPL, TSLA, NVDA"),
+                        ("Gold futures",            "GC=F"),
+                        ("Silver futures",          "SI=F"),
+                        ("Bitcoin",                 "BTC-USD"),
+                    ]
+                },
+                "new_listing": {
+                    "title": "Stock is too newly listed — not enough history",
+                    "items": [
+                        ("Problem",  f"Only {rows_1mo} days of data — model needs {window_need}+"),
+                        ("Fix 1",    "Wait a few months for more data to accumulate"),
+                        ("Fix 2",    "Reduce Window to 30 in Advanced Settings (password: 6348)"),
+                        ("Fix 3",    "Try a similar established stock instead"),
+                    ]
+                },
+                "period_too_long": {
+                    "title": "Try a shorter period",
+                    "items": [
+                        ("Change period to", "3mo or 6mo in the sidebar"),
+                        ("Then run again",   "click RUN DEEP LEARNING"),
+                    ]
+                },
+                "short_period": {
+                    "title": "Increase the training period",
+                    "items": [
+                        ("Current period", period_tried),
+                        ("Change to",      "1y or 2y or 5y in the sidebar"),
+                    ]
+                },
+            }
+            fix = fixes.get(suggestion, fixes["wrong_ticker"])
+            st.markdown(
+                f"<div style='background:rgba(0,245,255,0.04);"
+                f"border:1px solid rgba(0,245,255,0.15);border-radius:8px;"
+                f"padding:14px 18px;margin:8px 0;'>"
+                f"<div style='font-family:\"Share Tech Mono\",monospace;"
+                f"font-size:0.75rem;color:#00e5ff;margin-bottom:10px;'>"
+                f"💡 {fix['title']}</div>"
+                + "".join([
+                    f"<div style='display:flex;gap:12px;font-family:\"Share Tech Mono\","
+                    f"monospace;font-size:0.72rem;padding:4px 0;border-bottom:"
+                    f"1px solid rgba(0,245,255,0.06);'>"
+                    f"<span style='color:#445566;min-width:180px;'>{k}</span>"
+                    f"<span style='color:#e8f4f8;'>{v}</span></div>"
+                    for k, v in fix["items"]
+                ])
+                + "</div>",
+                unsafe_allow_html=True,
+            )
         else:
             prog = st.progress(0)
             stat = st.empty()
