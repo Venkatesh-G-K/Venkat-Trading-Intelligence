@@ -343,8 +343,13 @@ st.markdown(
 @st.cache_data(ttl=600, show_spinner=False)
 def load_and_prepare(ticker, period, window):
     """Steps 1–5: Download, clean, add features, scale, build sequences."""
-    # Step 1 — Download
-    raw = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+
+    # Step 1 — Download: always fetch max available data regardless of period
+    # This ensures new listings like MOBIKWIK.NS get all their history
+    raw = yf.download(ticker, period="max", progress=False, auto_adjust=True)
+    if raw is None or raw.empty:
+        # Fallback: try with the user-selected period
+        raw = yf.download(ticker, period=period, progress=False, auto_adjust=True)
     if raw is None or raw.empty:
         return None, None, None, None, None, None, None, None
 
@@ -354,58 +359,102 @@ def load_and_prepare(ticker, period, window):
     # Step 2 — Clean
     df = raw.sort_index().dropna(subset=["Close"]).ffill().bfill()
     df = df[~df.index.duplicated(keep="first")]
-    if len(df) < window * 3:
+
+    n_rows = len(df)
+
+    # Adapt window to available data: use at most 40% of available rows
+    effective_window = min(window, max(10, int(n_rows * 0.40)))
+
+    # Need at least window + 30 rows to build any sequences
+    min_needed = effective_window + 30
+    if n_rows < min_needed:
         return None, None, None, None, None, None, None, None
 
-    # Step 3 — Features
+    # Step 3 — Features (adapt to available data length)
     c = df["Close"].squeeze()
     h = df["High"].squeeze()
     l = df["Low"].squeeze()
     v = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series(1, index=df.index)
 
-    df["MA5"]   = c.rolling(5).mean()
-    df["MA10"]  = c.rolling(10).mean()
-    df["MA20"]  = c.rolling(20).mean()
-    df["MA50"]  = c.rolling(50).mean()
-    df["MA200"] = c.rolling(200).mean()
-    df["P_MA20"] = c / (df["MA20"] + 1e-9)
-    df["P_MA50"] = c / (df["MA50"] + 1e-9)
-    df["MA_ratio"]= df["MA20"] / (df["MA50"] + 1e-9)
+    # Short-period safe indicators (always computable)
+    df["MA5"]   = c.rolling(min(5,  n_rows//4)).mean()
+    df["MA10"]  = c.rolling(min(10, n_rows//4)).mean()
 
+    # Medium indicators — only if enough data
+    if n_rows >= 25:
+        df["MA20"]  = c.rolling(20).mean()
+        std20       = c.rolling(20).std()
+        bb_u        = df["MA20"] + 2 * std20
+        bb_l        = df["MA20"] - 2 * std20
+        df["BB_pct"]   = (c - bb_l) / (bb_u - bb_l + 1e-9)
+        df["BB_width"] = (bb_u - bb_l) / (df["MA20"] + 1e-9)
+        df["P_MA20"]   = c / (df["MA20"] + 1e-9)
+    else:
+        df["MA20"]     = c.rolling(5).mean()
+        df["BB_pct"]   = 0.5
+        df["BB_width"] = 0.0
+        df["P_MA20"]   = 1.0
+
+    # MA50 and MA200 — only if enough data, else use shorter MAs
+    if n_rows >= 55:
+        df["MA50"]     = c.rolling(50).mean()
+        df["P_MA50"]   = c / (df["MA50"] + 1e-9)
+        df["MA_ratio"] = df["MA20"] / (df["MA50"] + 1e-9)
+    else:
+        df["MA50"]     = df["MA20"]
+        df["P_MA50"]   = 1.0
+        df["MA_ratio"] = 1.0
+
+    # MA200 — only if 210+ rows
+    if n_rows >= 210:
+        df["MA200"] = c.rolling(200).mean()
+    else:
+        df["MA200"] = df["MA50"]   # use MA50 as proxy
+
+    # RSI
+    rsi_period = min(14, max(3, n_rows // 10))
     delta = c.diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    gain  = delta.clip(lower=0).rolling(rsi_period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(rsi_period).mean()
     df["RSI"] = 100 - 100 / (1 + gain / (loss + 1e-9))
 
-    e12 = c.ewm(span=12).mean(); e26 = c.ewm(span=26).mean()
+    # MACD
+    span12 = min(12, n_rows // 5); span26 = min(26, n_rows // 3)
+    e12 = c.ewm(span=span12).mean(); e26 = c.ewm(span=span26).mean()
     df["MACD"]     = e12 - e26
-    df["MACD_sig"] = df["MACD"].ewm(span=9).mean()
+    df["MACD_sig"] = df["MACD"].ewm(span=min(9, n_rows // 5)).mean()
     df["MACD_h"]   = df["MACD"] - df["MACD_sig"]
 
-    std20 = c.rolling(20).std()
-    bb_u  = df["MA20"] + 2 * std20
-    bb_l  = df["MA20"] - 2 * std20
-    df["BB_pct"]   = (c - bb_l) / (bb_u - bb_l + 1e-9)
-    df["BB_width"] = (bb_u - bb_l) / (df["MA20"] + 1e-9)
-
+    # ATR
+    atr_period = min(14, n_rows // 5)
     tr = pd.concat([(h-l),(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1)
-    df["ATR"]  = tr.rolling(14).mean()
+    df["ATR"]  = tr.rolling(atr_period).mean()
     df["ATR_r"]= df["ATR"] / (c + 1e-9)
 
-    df["Vol_r"] = v / (v.rolling(20).mean() + 1e-9)
+    # Volume
+    vol_period = min(20, n_rows // 4)
+    df["Vol_r"] = v / (v.rolling(vol_period).mean() + 1e-9)
 
-    low14  = l.rolling(14).min(); high14 = h.rolling(14).max()
+    # Stochastic
+    stoch_period = min(14, n_rows // 5)
+    low14  = l.rolling(stoch_period).min()
+    high14 = h.rolling(stoch_period).max()
     df["StochK"] = 100*(c-low14)/(high14-low14+1e-9)
-    df["StochD"] = df["StochK"].rolling(3).mean()
+    df["StochD"] = df["StochK"].rolling(min(3, stoch_period)).mean()
 
-    for lag in [1,2,3,5,10,20]:
-        df[f"Lag{lag}"] = c.shift(lag)
+    # Lag features — only as far back as we have data
+    for lag in [1, 2, 3, 5, 10, 20]:
+        if lag < n_rows // 3:
+            df[f"Lag{lag}"] = c.shift(lag)
+
     df["Ret"]  = c.pct_change()
-    df["Body"] = (df["Close"]-df["Open"]).abs()/(df["Open"]+1e-9)
+    df["Body"] = (df["Close"] - df["Open"]).abs() / (df["Open"] + 1e-9)
     df["Dir"]  = (df["Close"] >= df["Open"]).astype(float)
 
     df = df.dropna()
-    if len(df) < window * 2:
+
+    # After dropna, re-check we still have enough
+    if len(df) < effective_window + 20:
         return None, None, None, None, None, None, None, None
 
     FCOLS = [
@@ -421,17 +470,21 @@ def load_and_prepare(ticker, period, window):
     FCOLS = [f for f in FCOLS if f in df.columns]
 
     # Step 4 — Scale
-    close_sc = MinMaxScaler()
+    close_sc    = MinMaxScaler()
     close_scaled = close_sc.fit_transform(df[["Close"]].values)
-    feat_sc  = MinMaxScaler()
-    feat_scaled = feat_sc.fit_transform(df[FCOLS].values)
+    feat_sc     = MinMaxScaler()
+    feat_scaled  = feat_sc.fit_transform(df[FCOLS].values)
 
-    # Step 5 — Sequences
+    # Step 5 — Sequences using effective_window
     X, y = [], []
-    for i in range(window, len(feat_scaled)):
-        X.append(feat_scaled[i-window:i])
+    for i in range(effective_window, len(feat_scaled)):
+        X.append(feat_scaled[i-effective_window:i])
         y.append(close_scaled[i, 0])
     X = np.array(X); y = np.array(y)
+
+    # Store effective_window back into df as attribute for reference
+    df.attrs["effective_window"] = effective_window
+    df.attrs["original_window"]  = window
 
     return df, X, y, close_sc, feat_sc, feat_scaled, FCOLS, FCOLS.index("Close")
 
@@ -824,6 +877,17 @@ if st.session_state["run_training"] and st.session_state["results"] is None:
             prog = st.progress(0)
             stat = st.empty()
 
+            # Use effective window (may differ from cfg for new listings)
+            eff_win = df.attrs.get("effective_window", cfg["window"])
+            orig_win = df.attrs.get("original_window", cfg["window"])
+            if eff_win < orig_win:
+                st.info(
+                    f"ℹ️ Only **{len(df)} trading days** available for this stock. "
+                    f"Window auto-adjusted from {orig_win} → **{eff_win} days** "
+                    f"to fit the available data. Predictions will be less accurate than "
+                    f"stocks with longer history — treat as directional guidance only."
+                )
+
             results, histories, X_train, X_test, y_train, y_test, split = train_models(
                 X, y, cfg, which, prog, stat
             )
@@ -836,7 +900,7 @@ if st.session_state["run_training"] and st.session_state["results"] is None:
             )
             fut_preds = forecast_future(
                 results, close_sc, feat_scaled,
-                cfg["window"], X.shape[2], close_idx, cfg["future_days"]
+                eff_win, X.shape[2], close_idx, cfg["future_days"]
             )
 
             st.session_state["results"] = {
